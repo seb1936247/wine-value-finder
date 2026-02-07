@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import type { WineValueResult } from '../types/wine.ts';
 import ValueBadge from './ValueBadge.tsx';
 import EditWineModal from './EditWineModal.tsx';
@@ -22,6 +22,15 @@ export default function WineTable({ wines, status, currency, onStartLookup, onEd
   const [sortKey, setSortKey] = useState<SortKey>('valueScore');
   const [sortAsc, setSortAsc] = useState(false);
   const [editIndex, setEditIndex] = useState<number | null>(null);
+
+  // Auto-start lookup as soon as wines are parsed
+  const [autoStarted, setAutoStarted] = useState(false);
+  useEffect(() => {
+    if (status === 'parsed' && !autoStarted && wines.length > 0) {
+      setAutoStarted(true);
+      onStartLookup();
+    }
+  }, [status, autoStarted, wines.length, onStartLookup]);
 
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -51,6 +60,7 @@ export default function WineTable({ wines, status, currency, onStartLookup, onEd
   const lookupProgress = wines.filter(w => w.lookupStatus !== 'pending').length;
   const isLookingUp = status === 'looking_up';
   const hasLookupData = wines.some(w => w.lookupStatus !== 'pending');
+  const progressPct = wines.length > 0 ? Math.round((lookupProgress / wines.length) * 100) : 0;
 
   const SortHeader = ({ label, field }: { label: string; field: SortKey }) => (
     <th
@@ -66,25 +76,33 @@ export default function WineTable({ wines, status, currency, onStartLookup, onEd
 
   return (
     <div className="mt-6">
-      <div className="flex items-center justify-between mb-4">
-        <div>
-          <h2 className="text-lg font-semibold text-gray-800">
-            {wines.length} Wine{wines.length !== 1 ? 's' : ''} Found
-          </h2>
-          {isLookingUp && (
-            <div>
-              <p className="text-sm text-gray-500">
-                Looking up prices... {lookupProgress}/{wines.length}
-              </p>
-              <div className="mt-1 w-48 bg-gray-200 rounded-full h-2 overflow-hidden">
-                <div
-                  className="bg-purple-600 h-full rounded-full transition-all duration-500 ease-out"
-                  style={{ width: `${wines.length > 0 ? (lookupProgress / wines.length) * 100 : 0}%` }}
-                />
-              </div>
-            </div>
-          )}
+      {/* Big progress banner during lookup */}
+      {isLookingUp && (
+        <div className="mb-6 bg-purple-50 border border-purple-200 rounded-xl p-5">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-semibold text-purple-800">
+              Looking up prices & ratings...
+            </span>
+            <span className="text-sm font-bold text-purple-700">
+              {lookupProgress}/{wines.length} ({progressPct}%)
+            </span>
+          </div>
+          <div className="w-full bg-purple-200 rounded-full h-3 overflow-hidden">
+            <div
+              className="bg-purple-600 h-full rounded-full transition-all duration-700 ease-out"
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
+          <p className="text-xs text-purple-500 mt-2">
+            Results appear below as they come in
+          </p>
         </div>
+      )}
+
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-lg font-semibold text-gray-800">
+          {wines.length} Wine{wines.length !== 1 ? 's' : ''} Found
+        </h2>
         <div className="flex gap-2">
           {status === 'parsed' && (
             <button
