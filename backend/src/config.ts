@@ -25,14 +25,20 @@ for (const dir of searchDirs) {
 }
 
 if (!loaded) {
-  console.warn('No .env file found. Searched:', searchDirs.map(d => path.resolve(d, '.env')));
+  // Not an error in production — Railway/Vercel set env vars directly
+  console.log('No .env file found, using environment variables.');
 }
+
+// Use /tmp for uploads in production (Railway ephemeral filesystem)
+const uploadsDir = process.env.RAILWAY_ENVIRONMENT
+  ? '/tmp/uploads'
+  : path.resolve(__dirname, '../uploads');
 
 export const config = {
   port: parseInt(process.env.PORT || '3001', 10),
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
   wineSearcherApiKey: process.env.WINE_SEARCHER_API_KEY || '',
-  uploadsDir: path.resolve(__dirname, '../uploads'),
+  uploadsDir,
   maxFileSizeMB: 20,
 };
 
