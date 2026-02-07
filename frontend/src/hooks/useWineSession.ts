@@ -32,7 +32,7 @@ export function useWineSession() {
       }
     };
     poll(); // Initial fetch
-    pollRef.current = setInterval(poll, 3000);
+    pollRef.current = setInterval(poll, 1500);
   }, [stopPolling]);
 
   useEffect(() => {
