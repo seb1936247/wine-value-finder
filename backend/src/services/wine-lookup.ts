@@ -4,7 +4,7 @@ import type { WineValueResult } from '../types/wine.js';
 
 const client = new Anthropic({ apiKey: config.anthropicApiKey });
 
-interface WineLookupData {
+export interface WineLookupData {
   retailPriceAvg: number | null;
   retailPriceMin: number | null;
   criticScore: number | null;
@@ -12,35 +12,75 @@ interface WineLookupData {
   communityReviewCount: number | null;
 }
 
+// ── In-memory cache ─────────────────────────────────────────────
+// Key = normalized "name|vintage|currency", e.g. "chateau margaux|2015|GBP"
+const lookupCache = new Map<string, { data: WineLookupData; ts: number }>();
+const CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
+function cacheKey(wine: WineValueResult, currency: string): string {
+  const name = wine.name.toLowerCase().trim();
+  const vintage = wine.vintage ?? 'nv';
+  return `${name}|${vintage}|${currency}`;
+}
+
+function getCached(wine: WineValueResult, currency: string): WineLookupData | null {
+  const key = cacheKey(wine, currency);
+  const entry = lookupCache.get(key);
+  if (entry && Date.now() - entry.ts < CACHE_TTL) {
+    return entry.data;
+  }
+  if (entry) lookupCache.delete(key);
+  return null;
+}
+
+function setCache(wine: WineValueResult, currency: string, data: WineLookupData): void {
+  lookupCache.set(cacheKey(wine, currency), { data, ts: Date.now() });
+}
+
+export function getCacheStats() {
+  return { size: lookupCache.size };
+}
+
+// ── Batch lookup ────────────────────────────────────────────────
 export async function lookupWinesBatch(wines: WineValueResult[], currency: string = 'USD'): Promise<WineLookupData[]> {
   const currencySymbol = currency === 'GBP' ? '£' : currency === 'EUR' ? '€' : '$';
 
-  // Build a list of wines to look up, including producer for better identification
-  const wineList = wines.map((w, i) =>
-    `${i + 1}. "${w.name}" by ${w.producer} (${w.vintage ?? 'NV'}) [${w.region || 'unknown region'}] — restaurant price: ${currencySymbol}${w.restaurantPrice}`
+  // Check cache first — separate cached vs uncached
+  const results: (WineLookupData | null)[] = new Array(wines.length).fill(null);
+  const uncachedIndices: number[] = [];
+
+  for (let i = 0; i < wines.length; i++) {
+    const cached = getCached(wines[i], currency);
+    if (cached) {
+      results[i] = cached;
+    } else {
+      uncachedIndices.push(i);
+    }
+  }
+
+  const cachedCount = wines.length - uncachedIndices.length;
+  if (cachedCount > 0) {
+    console.log(`  Cache hit: ${cachedCount}/${wines.length} wines`);
+  }
+
+  if (uncachedIndices.length === 0) {
+    return results as WineLookupData[];
+  }
+
+  // Build compact list for uncached wines only
+  const uncachedWines = uncachedIndices.map(i => wines[i]);
+  const wineList = uncachedWines.map((w, i) =>
+    `${i + 1}. ${w.name} (${w.vintage ?? 'NV'}) ${w.region || ''} — ${currencySymbol}${w.restaurantPrice}`
   ).join('\n');
 
-  const prompt = `You are a sommelier and wine market expert. I need retail price and rating data for the following wines from a restaurant wine list. The restaurant prices are in ${currency}.
+  const prompt = `Wine price/rating lookup. Currency: ${currency}. For each wine return JSON array with: retailPriceAvg, retailPriceMin (in ${currency}), criticScore (100-pt), communityScore (100-pt), communityReviewCount.
 
-For EACH wine, provide:
-- retailPriceAvg: the typical RETAIL price in ${currency} (what a consumer would pay at a wine shop or online retailer). Use ${currency} to match the restaurant's currency.
-- retailPriceMin: the lowest retail price you'd expect to find in ${currency}
-- criticScore: the typical professional critic score (Wine Advocate/Robert Parker, Wine Spectator, Jancis Robinson, James Suckling, Vinous, etc.) on a 100-point scale. Many of these wines WILL have professional reviews.
-- communityScore: the typical CellarTracker or Vivino community score on a 100-point scale
-- communityReviewCount: approximate number of community tasting notes (estimate based on the wine's popularity)
+Give best estimates. Use null ONLY if truly unknown. These are restaurant wines from known producers.
+${currency === 'GBP' ? 'Use UK retail prices.' : currency === 'EUR' ? 'Use EU retail prices.' : ''}
 
-IMPORTANT GUIDELINES:
-- Most of these wines are from well-known producers. You SHOULD be able to provide estimates for the majority.
-- For well-known producers (Egly-Ouriet, Jacques Selosse, Pierre Peters, Billecart-Salmon, Salon, Taittinger, etc.), you definitely know approximate prices and scores.
-- Provide your BEST ESTIMATE rather than null. Only use null if you truly have zero information about a wine.
-- Retail prices should be in ${currency} and reflect current market prices (2024-2025).
-- For NV Champagnes, use the current release pricing.
-- For UK/GBP prices, use UK retail pricing (e.g., from Berry Bros, Justerini & Brooks, Lea & Sandeman, The Wine Society, etc.)
-
-Here are the wines:
 ${wineList}
 
-Return ONLY a JSON array (no markdown, no explanation) where each element has: retailPriceAvg, retailPriceMin, criticScore, communityScore, communityReviewCount.`;
+JSON array only, no markdown:`;
 
   const response = await client.messages.create({
     model: 'claude-sonnet-4-20250514',
@@ -70,16 +110,26 @@ Return ONLY a JSON array (no markdown, no explanation) where each element has: r
     }
   }
 
-  let results: WineLookupData[];
+  let apiResults: WineLookupData[];
   try {
-    results = JSON.parse(jsonStr.trim());
+    apiResults = JSON.parse(jsonStr.trim());
   } catch (err) {
     console.error('Failed to parse lookup response. Raw text:', textBlock.text.substring(0, 500));
     throw err;
   }
 
-  const found = results.filter(r => r.retailPriceAvg !== null).length;
-  console.log(`  Batch result: ${found}/${results.length} wines with price data`);
+  // Map results back and populate cache
+  for (let j = 0; j < uncachedIndices.length; j++) {
+    const origIdx = uncachedIndices[j];
+    const data = apiResults[j];
+    if (data) {
+      results[origIdx] = data;
+      setCache(wines[origIdx], currency, data);
+    }
+  }
 
-  return results;
+  const found = apiResults.filter(r => r.retailPriceAvg !== null).length;
+  console.log(`  API result: ${found}/${apiResults.length} wines with price data`);
+
+  return results as WineLookupData[];
 }

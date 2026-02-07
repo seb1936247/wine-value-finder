@@ -32,7 +32,8 @@ export function useWineSession() {
       }
     };
     poll(); // Initial fetch
-    pollRef.current = setInterval(poll, 1500);
+    // Poll fast (1s) during active operations for snappy UI
+    pollRef.current = setInterval(poll, 1000);
   }, [stopPolling]);
 
   useEffect(() => {

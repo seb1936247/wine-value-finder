@@ -72,9 +72,17 @@ export default function WineTable({ wines, status, currency, onStartLookup, onEd
             {wines.length} Wine{wines.length !== 1 ? 's' : ''} Found
           </h2>
           {isLookingUp && (
-            <p className="text-sm text-gray-500">
-              Looking up prices... {lookupProgress}/{wines.length}
-            </p>
+            <div>
+              <p className="text-sm text-gray-500">
+                Looking up prices... {lookupProgress}/{wines.length}
+              </p>
+              <div className="mt-1 w-48 bg-gray-200 rounded-full h-2 overflow-hidden">
+                <div
+                  className="bg-purple-600 h-full rounded-full transition-all duration-500 ease-out"
+                  style={{ width: `${wines.length > 0 ? (lookupProgress / wines.length) * 100 : 0}%` }}
+                />
+              </div>
+            </div>
           )}
         </div>
         <div className="flex gap-2">
