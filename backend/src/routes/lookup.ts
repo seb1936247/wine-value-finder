@@ -26,8 +26,8 @@ router.post('/:sessionId', async (req, res) => {
   try {
     const pendingWines = session.wines.filter(w => w.lookupStatus === 'pending');
 
-    // Bigger batches = fewer API calls = faster
-    const BATCH_SIZE = 40;
+    // Smaller batches with web search (each batch does multiple web searches)
+    const BATCH_SIZE = 10;
     const batches: typeof pendingWines[] = [];
     for (let i = 0; i < pendingWines.length; i += BATCH_SIZE) {
       batches.push(pendingWines.slice(i, i + BATCH_SIZE));
