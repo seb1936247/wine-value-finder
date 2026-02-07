@@ -43,7 +43,7 @@ ${wineList}
 Return ONLY a JSON array (no markdown, no explanation) where each element has: retailPriceAvg, retailPriceMin, criticScore, communityScore, communityReviewCount.`;
 
   const response = await client.messages.create({
-    model: 'claude-3-5-haiku-20241022',
+    model: 'claude-haiku-4-5-20250415',
     max_tokens: 8192,
     messages: [{ role: 'user', content: prompt }],
   });
