@@ -57,7 +57,7 @@ export default function App() {
         </p>
       </header>
 
-      {!session || session.status === 'error' ? (
+      {!session || (session.status === 'error' && session.wines.length === 0) ? (
         <div className="max-w-xl mx-auto">
           <UploadZone onUpload={upload} uploading={uploading} />
           {error && (
@@ -91,6 +91,11 @@ export default function App() {
               </a>
             )}
           </div>
+          {session.status === 'error' && session.wines.length > 0 && (
+            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+              Lookup error: {session.error}. Partial results shown below.
+            </div>
+          )}
           <WineTable
             wines={session.wines}
             status={session.status}
@@ -102,7 +107,7 @@ export default function App() {
       )}
 
       <footer className="text-center mt-12 text-xs text-gray-400">
-        Prices and ratings are AI-estimated. Click critic/community scores to verify on Wine-Searcher and CellarTracker.
+        Prices and ratings sourced via web search. Click critic/community scores to verify on Wine-Searcher and CellarTracker.
       </footer>
     </div>
   );

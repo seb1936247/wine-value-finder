@@ -26,74 +26,61 @@ router.post('/:sessionId', async (req, res) => {
   try {
     const pendingWines = session.wines.filter(w => w.lookupStatus === 'pending');
 
-    // Smaller batches with web search (each batch does multiple web searches)
-    const BATCH_SIZE = 10;
-    const batches: typeof pendingWines[] = [];
-    for (let i = 0; i < pendingWines.length; i += BATCH_SIZE) {
-      batches.push(pendingWines.slice(i, i + BATCH_SIZE));
+    // Each wine gets its own web search API call, run in waves of 5 parallel
+    const WAVE_SIZE = 5;
+    const waves: typeof pendingWines[] = [];
+    for (let i = 0; i < pendingWines.length; i += WAVE_SIZE) {
+      waves.push(pendingWines.slice(i, i + WAVE_SIZE));
     }
 
-    console.log(`Looking up ${pendingWines.length} wines in ${batches.length} parallel batches`);
+    console.log(`Looking up ${pendingWines.length} wines in ${waves.length} waves of ${WAVE_SIZE}`);
 
-    // Run up to 3 batches in parallel for speed
-    const MAX_PARALLEL = 3;
-    for (let groupStart = 0; groupStart < batches.length; groupStart += MAX_PARALLEL) {
-      const group = batches.slice(groupStart, groupStart + MAX_PARALLEL);
+    for (let waveIdx = 0; waveIdx < waves.length; waveIdx++) {
+      const wave = waves[waveIdx];
+      console.log(`  Wave ${waveIdx + 1}/${waves.length} (${wave.length} wines in parallel)`);
 
-      const batchPromises = group.map((batch, idx) => {
-        const batchNum = groupStart + idx + 1;
-        console.log(`  Starting batch ${batchNum}/${batches.length} (${batch.length} wines)`);
-        return lookupWinesBatch(batch, session.currency);
-      });
+      const results = await lookupWinesBatch(wave, session.currency);
 
-      const groupResults = await Promise.all(batchPromises);
+      for (let i = 0; i < wave.length; i++) {
+        const wine = wave[i];
+        const data = results[i];
 
-      // Apply results from all parallel batches
-      for (let bIdx = 0; bIdx < group.length; bIdx++) {
-        const batch = group[bIdx];
-        const results = groupResults[bIdx];
+        if (data) {
+          wine.retailPriceAvg = data.retailPriceAvg;
+          wine.retailPriceMin = data.retailPriceMin;
+          wine.criticScore = data.criticScore;
+          wine.communityScore = data.communityScore;
+          wine.communityReviewCount = data.communityReviewCount;
 
-        for (let i = 0; i < batch.length; i++) {
-          const wine = batch[i];
-          const data = results[i];
+          // Generate links for user to verify
+          const searchName = encodeURIComponent(wine.name.replace(/ /g, '+'));
+          wine.wineSearcherUrl = `https://www.wine-searcher.com/find/${searchName}${wine.vintage ? '/' + wine.vintage : ''}`;
+          wine.cellarTrackerUrl = `https://www.cellartracker.com/list.html?szSearch=${encodeURIComponent(wine.name + (wine.vintage ? ' ' + wine.vintage : ''))}`;
 
-          if (data) {
-            wine.retailPriceAvg = data.retailPriceAvg;
-            wine.retailPriceMin = data.retailPriceMin;
-            wine.criticScore = data.criticScore;
-            wine.communityScore = data.communityScore;
-            wine.communityReviewCount = data.communityReviewCount;
+          // Calculate derived values
+          if (wine.retailPriceAvg) {
+            wine.markupPercent = Math.round(calculateMarkup(wine.restaurantPrice, wine.retailPriceAvg));
+          }
 
-            // Generate links for user to verify
-            const searchName = encodeURIComponent(wine.name.replace(/ /g, '+'));
-            wine.wineSearcherUrl = `https://www.wine-searcher.com/find/${searchName}${wine.vintage ? '/' + wine.vintage : ''}`;
-            wine.cellarTrackerUrl = `https://www.cellartracker.com/list.html?szSearch=${encodeURIComponent(wine.name + (wine.vintage ? ' ' + wine.vintage : ''))}`;
+          wine.valueScore = calculateValueScore(
+            wine.restaurantPrice,
+            wine.retailPriceAvg,
+            wine.criticScore,
+            wine.communityScore
+          );
 
-            // Calculate derived values
-            if (wine.retailPriceAvg) {
-              wine.markupPercent = Math.round(calculateMarkup(wine.restaurantPrice, wine.retailPriceAvg));
-            }
-
-            wine.valueScore = calculateValueScore(
-              wine.restaurantPrice,
-              wine.retailPriceAvg,
-              wine.criticScore,
-              wine.communityScore
-            );
-
-            // Determine lookup status
-            if (wine.retailPriceAvg || wine.communityScore) {
-              wine.lookupStatus = wine.retailPriceAvg && wine.communityScore ? 'found' : 'partial';
-            } else {
-              wine.lookupStatus = 'not_found';
-            }
+          // Determine lookup status
+          if (wine.retailPriceAvg || wine.communityScore) {
+            wine.lookupStatus = wine.retailPriceAvg && wine.communityScore ? 'found' : 'partial';
           } else {
             wine.lookupStatus = 'not_found';
           }
+        } else {
+          wine.lookupStatus = 'not_found';
         }
       }
 
-      // Persist after each parallel group so polling sees progress
+      // Persist after each wave so polling sees progress
       setSession(session);
     }
 

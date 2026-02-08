@@ -88,34 +88,41 @@ export async function parseWineList(filePath: string): Promise<ParseResult> {
     messages: [{ role: 'user', content: contentBlocks }],
   });
 
-  const textBlock = response.content.find(b => b.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') {
+  console.log(`Parse response: stop_reason=${response.stop_reason}, content blocks=${response.content.length}`);
+
+  // Collect all text from all text blocks
+  const textBlocks = response.content.filter(b => b.type === 'text');
+  if (textBlocks.length === 0) {
     throw new Error('No text response from Claude');
   }
 
-  // Extract JSON from the response (may be wrapped in markdown code blocks)
-  let jsonStr = textBlock.text.trim();
+  // Try each text block (last first) to find JSON
+  for (const block of [...textBlocks].reverse()) {
+    if (block.type !== 'text') continue;
+    let jsonStr = block.text.trim();
 
-  // Strip markdown code fences if present
-  if (jsonStr.startsWith('```')) {
-    // Remove opening fence (```json or ```)
-    jsonStr = jsonStr.replace(/^```(?:json)?\s*\n?/, '');
-    // Remove closing fence
-    jsonStr = jsonStr.replace(/\n?```\s*$/, '');
-  }
+    // Strip markdown code fences if present
+    if (jsonStr.startsWith('```')) {
+      jsonStr = jsonStr.replace(/^```(?:json)?\s*\n?/, '');
+      jsonStr = jsonStr.replace(/\n?```\s*$/, '');
+    }
 
-  // As a fallback, find the first { and last } to extract JSON object
-  if (!jsonStr.startsWith('{') && !jsonStr.startsWith('[')) {
+    // Find JSON object
     const firstBrace = jsonStr.indexOf('{');
     const lastBrace = jsonStr.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace !== -1) {
-      jsonStr = jsonStr.substring(firstBrace, lastBrace + 1);
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      try {
+        const parsed = JSON.parse(jsonStr.substring(firstBrace, lastBrace + 1));
+        return {
+          currency: parsed.currency || 'USD',
+          wines: parsed.wines as ParsedWine[],
+        };
+      } catch { /* try next block */ }
     }
   }
 
-  const parsed = JSON.parse(jsonStr.trim());
-  return {
-    currency: parsed.currency || 'USD',
-    wines: parsed.wines as ParsedWine[],
-  };
+  // If we get here, no block had valid JSON — log and throw
+  const allText = textBlocks.map(b => b.type === 'text' ? b.text : '').join('\n');
+  console.error('Failed to find JSON in parser response. Full text:', allText.substring(0, 1000));
+  throw new Error(`Could not parse wine list. Claude responded: "${allText.substring(0, 100)}..."`);
 }

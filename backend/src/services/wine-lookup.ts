@@ -2,7 +2,10 @@ import Anthropic from '@anthropic-ai/sdk';
 import { config } from '../config.js';
 import type { WineValueResult } from '../types/wine.js';
 
-const client = new Anthropic({ apiKey: config.anthropicApiKey });
+const client = new Anthropic({
+  apiKey: config.anthropicApiKey,
+  timeout: 3 * 60 * 1000, // 3 min timeout per request
+});
 
 export interface WineLookupData {
   retailPriceAvg: number | null;
@@ -40,10 +43,73 @@ export function getCacheStats() {
   return { size: lookupCache.size };
 }
 
-// ── Batch lookup with web search ────────────────────────────────
-export async function lookupWinesBatch(wines: WineValueResult[], currency: string = 'USD'): Promise<WineLookupData[]> {
+// ── Single wine lookup with web search ──────────────────────────
+async function lookupSingleWine(wine: WineValueResult, currency: string): Promise<WineLookupData> {
   const currencySymbol = currency === 'GBP' ? '£' : currency === 'EUR' ? '€' : '$';
 
+  const prompt = `Look up real data for this wine using web search:
+
+"${wine.name}" ${wine.vintage ?? 'NV'} ${wine.region || ''}
+
+Search wine-searcher.com for the current retail price in ${currency}, and search for critic ratings and CellarTracker community score.
+
+Return ONLY a single JSON object (no markdown, no explanation):
+{"retailPriceAvg": <avg retail price in ${currency} or null>, "retailPriceMin": <min retail price in ${currency} or null>, "criticScore": <highest professional critic score 0-100 or null>, "communityScore": <CellarTracker community score 0-100 or null>, "communityReviewCount": <number of CellarTracker tasting notes or null>}`;
+
+  const requestBody: any = {
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 1024,
+    messages: [{ role: 'user', content: prompt }],
+    tools: [{
+      type: 'web_search_20250305',
+      name: 'web_search',
+      max_uses: 3,
+    }],
+  };
+
+  let response = await client.messages.create(requestBody);
+
+  // Handle pause_turn — continue the conversation if Claude paused
+  let attempts = 0;
+  while ((response.stop_reason as string) === 'pause_turn' && attempts < 3) {
+    attempts++;
+    console.log(`    pause_turn for "${wine.name}", continuing (attempt ${attempts})...`);
+    requestBody.messages = [
+      { role: 'user', content: prompt },
+      { role: 'assistant', content: response.content },
+      { role: 'user', content: 'Please continue and provide the JSON result.' },
+    ];
+    response = await client.messages.create(requestBody);
+  }
+
+  // Extract JSON from response
+  const textBlocks = response.content.filter((b: any) => b.type === 'text');
+
+  for (const block of [...textBlocks].reverse()) {
+    if (block.type !== 'text') continue;
+    let str = block.text.trim();
+
+    // Strip markdown fences
+    if (str.startsWith('```')) {
+      str = str.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+    }
+
+    // Find JSON object
+    const firstBrace = str.indexOf('{');
+    const lastBrace = str.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      try {
+        return JSON.parse(str.substring(firstBrace, lastBrace + 1));
+      } catch { /* try next block */ }
+    }
+  }
+
+  console.log(`    No valid JSON for "${wine.name}", returning nulls`);
+  return { retailPriceAvg: null, retailPriceMin: null, criticScore: null, communityScore: null, communityReviewCount: null };
+}
+
+// ── Batch lookup — runs individual lookups in parallel ───────────
+export async function lookupWinesBatch(wines: WineValueResult[], currency: string = 'USD'): Promise<WineLookupData[]> {
   // Check cache first
   const results: (WineLookupData | null)[] = new Array(wines.length).fill(null);
   const uncachedIndices: number[] = [];
@@ -66,117 +132,28 @@ export async function lookupWinesBatch(wines: WineValueResult[], currency: strin
     return results as WineLookupData[];
   }
 
-  // Build wine list for uncached wines
-  const uncachedWines = uncachedIndices.map(i => wines[i]);
-  const wineList = uncachedWines.map((w, i) =>
-    `${i + 1}. ${w.name} (${w.vintage ?? 'NV'}) ${w.region || ''} — restaurant price: ${currencySymbol}${w.restaurantPrice}`
-  ).join('\n');
-
-  const prompt = `I need REAL current retail prices and ratings for these wines. Use web search to look up ACTUAL data from wine-searcher.com and cellartracker.com.
-
-For each wine, search for:
-1. The current average retail price and minimum retail price (in ${currency}) from wine-searcher.com
-2. The professional critic score (from Wine Advocate, Wine Spectator, Jancis Robinson, James Suckling, Vinous, or Decanter) — use the highest available
-3. The CellarTracker community score and number of tasting notes
-
-Here are the wines:
-${wineList}
-
-After searching, return ONLY a JSON array (no markdown, no explanation) with one object per wine in the same order. Each object must have:
-- retailPriceAvg: number or null (average retail price in ${currency})
-- retailPriceMin: number or null (lowest retail price in ${currency})
-- criticScore: number or null (professional critic score, 100-point scale)
-- communityScore: number or null (CellarTracker community score, 100-point scale)
-- communityReviewCount: number or null (number of CellarTracker tasting notes)
-
-Use null only if you truly cannot find the data after searching. Return the JSON array only:`;
-
-  // Allow generous web searches for the batch — up to 20 searches for thorough lookups
-  const maxSearches = Math.min(uncachedWines.length * 2, 20);
-
-  const requestBody: any = {
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 8192,
-    messages: [{ role: 'user', content: prompt }],
-    tools: [{
-      type: 'web_search_20250305',
-      name: 'web_search',
-      max_uses: maxSearches,
-    }],
-  };
-
-  const response = await client.messages.create(requestBody);
-
-  // Extract the final text block (after all search results)
-  const textBlocks = response.content.filter(b => b.type === 'text');
-  const lastTextBlock = textBlocks[textBlocks.length - 1];
-
-  if (!lastTextBlock || lastTextBlock.type !== 'text') {
-    throw new Error('No text response from Claude');
-  }
-
-  let jsonStr = lastTextBlock.text.trim();
-
-  // Strip markdown code fences if present
-  if (jsonStr.startsWith('```')) {
-    jsonStr = jsonStr.replace(/^```(?:json)?\s*\n?/, '');
-    jsonStr = jsonStr.replace(/\n?```\s*$/, '');
-  }
-
-  // Fallback: find the array
-  if (!jsonStr.startsWith('[')) {
-    const firstBracket = jsonStr.indexOf('[');
-    const lastBracket = jsonStr.lastIndexOf(']');
-    if (firstBracket !== -1 && lastBracket !== -1) {
-      jsonStr = jsonStr.substring(firstBracket, lastBracket + 1);
+  // Look up each uncached wine individually (in parallel within this batch)
+  const lookupPromises = uncachedIndices.map(async (origIdx) => {
+    const wine = wines[origIdx];
+    try {
+      const data = await lookupSingleWine(wine, currency);
+      setCache(wine, currency, data);
+      return { origIdx, data };
+    } catch (err) {
+      console.error(`  Error looking up "${wine.name}":`, (err as Error).message);
+      const nullData: WineLookupData = { retailPriceAvg: null, retailPriceMin: null, criticScore: null, communityScore: null, communityReviewCount: null };
+      return { origIdx, data: nullData };
     }
+  });
+
+  const lookupResults = await Promise.all(lookupPromises);
+
+  for (const { origIdx, data } of lookupResults) {
+    results[origIdx] = data;
   }
 
-  let apiResults: WineLookupData[];
-  try {
-    apiResults = JSON.parse(jsonStr.trim());
-  } catch (err) {
-    console.error('Failed to parse lookup response. Raw text:', lastTextBlock.text.substring(0, 500));
-    // Try to find JSON in ALL text blocks (Claude might put it in an earlier one)
-    for (const block of textBlocks) {
-      if (block.type === 'text') {
-        let tryStr = block.text.trim();
-        if (tryStr.startsWith('```')) {
-          tryStr = tryStr.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
-        }
-        const fb = tryStr.indexOf('[');
-        const lb = tryStr.lastIndexOf(']');
-        if (fb !== -1 && lb !== -1 && lb > fb) {
-          try {
-            apiResults = JSON.parse(tryStr.substring(fb, lb + 1));
-            break;
-          } catch { /* continue */ }
-        }
-      }
-    }
-    if (!apiResults!) {
-      throw err;
-    }
-  }
-
-  // Log search usage
-  const searchUse = (response.usage as any)?.server_tool_use;
-  if (searchUse) {
-    console.log(`  Web searches used: ${searchUse.web_search_requests}`);
-  }
-
-  // Map results back and populate cache
-  for (let j = 0; j < uncachedIndices.length; j++) {
-    const origIdx = uncachedIndices[j];
-    const data = apiResults[j];
-    if (data) {
-      results[origIdx] = data;
-      setCache(wines[origIdx], currency, data);
-    }
-  }
-
-  const found = apiResults.filter(r => r.retailPriceAvg !== null).length;
-  console.log(`  Result: ${found}/${apiResults.length} wines with price data`);
+  const found = lookupResults.filter(r => r.data.retailPriceAvg !== null).length;
+  console.log(`  Result: ${found}/${uncachedIndices.length} wines with price data`);
 
   return results as WineLookupData[];
 }
