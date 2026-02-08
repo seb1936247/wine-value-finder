@@ -47,14 +47,24 @@ export function getCacheStats() {
 async function lookupSingleWine(wine: WineValueResult, currency: string): Promise<WineLookupData> {
   const currencySymbol = currency === 'GBP' ? '£' : currency === 'EUR' ? '€' : '$';
 
-  const prompt = `Look up real data for this wine using web search:
+  const vintageStr = wine.vintage ?? 'NV';
+  const searchTerm = `${wine.name} ${vintageStr}`;
 
-"${wine.name}" ${wine.vintage ?? 'NV'} ${wine.region || ''}
+  const prompt = `I need accurate retail price and rating data for this specific wine:
 
-Search wine-searcher.com for the current retail price in ${currency}, and search for critic ratings and CellarTracker community score.
+Wine: "${wine.name}"
+Vintage: ${vintageStr}
+Region: ${wine.region || 'unknown'}
 
-Return ONLY a single JSON object (no markdown, no explanation):
-{"retailPriceAvg": <avg retail price in ${currency} or null>, "retailPriceMin": <min retail price in ${currency} or null>, "criticScore": <highest professional critic score 0-100 or null>, "communityScore": <CellarTracker community score 0-100 or null>, "communityReviewCount": <number of CellarTracker tasting notes or null>}`;
+IMPORTANT INSTRUCTIONS:
+1. Search for "${searchTerm}" on wine-searcher.com. Look for the AVERAGE price and LOWEST price shown on wine-searcher for a standard 750ml bottle in ${currency}. Make sure the vintage matches exactly (${vintageStr}). Do NOT use prices from a different vintage.
+2. Search for critic scores — look for Robert Parker/Wine Advocate, James Suckling, Wine Spectator, Jancis Robinson, Vinous, or Decanter scores for the ${vintageStr} vintage specifically.
+3. Search for "${searchTerm}" on cellartracker.com for the community score and number of tasting notes.
+
+${currency === 'GBP' ? 'Prices must be in British Pounds (£). Search UK retailers.' : currency === 'EUR' ? 'Prices must be in Euros (€). Search European retailers.' : 'Prices must be in US Dollars ($).'}
+
+Return ONLY a JSON object (no markdown, no other text):
+{"retailPriceAvg": <number or null>, "retailPriceMin": <number or null>, "criticScore": <number 0-100 or null>, "communityScore": <number 0-100 or null>, "communityReviewCount": <number or null>}`;
 
   const requestBody: any = {
     model: 'claude-sonnet-4-20250514',
