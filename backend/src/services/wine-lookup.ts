@@ -45,35 +45,36 @@ export function getCacheStats() {
 
 // ── Single wine lookup with web search ──────────────────────────
 async function lookupSingleWine(wine: WineValueResult, currency: string): Promise<WineLookupData> {
-  const currencySymbol = currency === 'GBP' ? '£' : currency === 'EUR' ? '€' : '$';
-
   const vintageStr = wine.vintage ?? 'NV';
-  const searchTerm = `${wine.name} ${vintageStr}`;
+  // Build a concise search name: producer + key wine name (without long descriptors)
+  const producer = wine.producer || '';
+  const simpleName = producer ? `${producer} ${wine.name.replace(producer, '').trim()}` : wine.name;
 
-  const prompt = `I need accurate retail price and rating data for this specific wine:
+  const prompt = `Find retail price and ratings for this wine. Return JSON only.
 
 Wine: "${wine.name}"
+Producer: ${producer || 'unknown'}
 Vintage: ${vintageStr}
-Region: ${wine.region || 'unknown'}
 
-IMPORTANT INSTRUCTIONS:
-1. Search for "${searchTerm}" on wine-searcher.com. Look for the AVERAGE price and LOWEST price shown on wine-searcher for a standard 750ml bottle in ${currency}. Make sure the vintage matches exactly (${vintageStr}). Do NOT use prices from a different vintage.
-2. Search for critic scores — look for Robert Parker/Wine Advocate, James Suckling, Wine Spectator, Jancis Robinson, Vinous, or Decanter scores for the ${vintageStr} vintage specifically.
-3. Search for "${searchTerm}" on cellartracker.com for the community score and number of tasting notes.
+Search wine-searcher.com for "${simpleName} ${vintageStr}" to find:
+- Average retail price and lowest price for a 750ml bottle in ${currency}
+- Critic score (Parker, Suckling, Wine Spectator, Vinous, or Decanter)
 
-${currency === 'GBP' ? 'Prices must be in British Pounds (£). Search UK retailers.' : currency === 'EUR' ? 'Prices must be in Euros (€). Search European retailers.' : 'Prices must be in US Dollars ($).'}
+Then search cellartracker.com for "${producer} ${vintageStr}" to find community score.
 
-Return ONLY a JSON object (no markdown, no other text):
+${currency === 'GBP' ? 'Prices in GBP (£).' : currency === 'EUR' ? 'Prices in EUR (€).' : 'Prices in USD ($).'}
+
+Return ONLY JSON (no markdown):
 {"retailPriceAvg": <number or null>, "retailPriceMin": <number or null>, "criticScore": <number 0-100 or null>, "communityScore": <number 0-100 or null>, "communityReviewCount": <number or null>}`;
 
   const requestBody: any = {
     model: 'claude-sonnet-4-20250514',
-    max_tokens: 1024,
+    max_tokens: 2048,
     messages: [{ role: 'user', content: prompt }],
     tools: [{
       type: 'web_search_20250305',
       name: 'web_search',
-      max_uses: 3,
+      max_uses: 5,
     }],
   };
 
@@ -81,7 +82,7 @@ Return ONLY a JSON object (no markdown, no other text):
 
   // Handle pause_turn — continue the conversation if Claude paused
   let attempts = 0;
-  while ((response.stop_reason as string) === 'pause_turn' && attempts < 3) {
+  while ((response.stop_reason as string) === 'pause_turn' && attempts < 5) {
     attempts++;
     console.log(`    pause_turn for "${wine.name}", continuing (attempt ${attempts})...`);
     requestBody.messages = [
