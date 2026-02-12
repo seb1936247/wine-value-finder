@@ -62,6 +62,13 @@ ${currency === 'GBP' ? 'Prices in GBP (£). Look at UK prices.' : currency === '
 Return ONLY a JSON object, no explanation:
 {"retailPriceAvg": <number or null>, "retailPriceMin": <number or null>, "criticScore": <number 0-100 or null>, "communityScore": <number 0-100 or null>, "communityReviewCount": <number or null>}`;
 
+  // Build user location for currency-appropriate results
+  const userLocation = currency === 'GBP'
+    ? { type: 'approximate', country: 'GB', region: 'England', city: 'London' }
+    : currency === 'EUR'
+    ? { type: 'approximate', country: 'FR', region: 'Ile-de-France', city: 'Paris' }
+    : { type: 'approximate', country: 'US', region: 'New York', city: 'New York' };
+
   const requestBody: any = {
     model: 'claude-sonnet-4-20250514',
     max_tokens: 2048,
@@ -70,6 +77,8 @@ Return ONLY a JSON object, no explanation:
       type: 'web_search_20250305',
       name: 'web_search',
       max_uses: 5,
+      allowed_domains: ['wine-searcher.com', 'cellartracker.com'],
+      user_location: userLocation,
     }],
   };
 
