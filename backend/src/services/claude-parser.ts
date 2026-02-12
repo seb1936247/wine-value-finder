@@ -45,6 +45,49 @@ interface ParseResult {
   wines: ParsedWine[];
 }
 
+// Try to salvage truncated JSON by extracting complete wine objects
+function salvageTruncatedJson(text: string): ParseResult | null {
+  // Find the wines array start
+  const winesIdx = text.indexOf('"wines"');
+  if (winesIdx === -1) return null;
+
+  const arrayStart = text.indexOf('[', winesIdx);
+  if (arrayStart === -1) return null;
+
+  // Extract currency
+  const currencyMatch = text.match(/"currency"\s*:\s*"(\w+)"/);
+  const currency = currencyMatch ? currencyMatch[1] : 'USD';
+
+  // Find all complete wine objects by matching balanced braces
+  const wines: ParsedWine[] = [];
+  let depth = 0;
+  let objStart = -1;
+
+  for (let i = arrayStart + 1; i < text.length; i++) {
+    if (text[i] === '{' && depth === 0) {
+      objStart = i;
+      depth = 1;
+    } else if (text[i] === '{') {
+      depth++;
+    } else if (text[i] === '}') {
+      depth--;
+      if (depth === 0 && objStart !== -1) {
+        const objStr = text.substring(objStart, i + 1);
+        try {
+          wines.push(JSON.parse(objStr));
+        } catch { /* skip malformed object */ }
+        objStart = -1;
+      }
+    }
+  }
+
+  if (wines.length > 0) {
+    console.log(`  Salvaged ${wines.length} wines from truncated response`);
+    return { currency, wines };
+  }
+  return null;
+}
+
 export async function parseWineList(filePath: string): Promise<ParseResult> {
   const ext = path.extname(filePath).toLowerCase();
   const fileBuffer = fs.readFileSync(filePath);
@@ -84,7 +127,7 @@ export async function parseWineList(filePath: string): Promise<ParseResult> {
 
   const response = await client.messages.create({
     model: 'claude-sonnet-4-20250514',
-    max_tokens: 16384,
+    max_tokens: 32768,
     messages: [{ role: 'user', content: contentBlocks }],
   });
 
@@ -96,7 +139,9 @@ export async function parseWineList(filePath: string): Promise<ParseResult> {
     throw new Error('No text response from Claude');
   }
 
-  // Try each text block (last first) to find JSON
+  const allText = textBlocks.map(b => b.type === 'text' ? b.text : '').join('\n');
+
+  // Try each text block (last first) to find complete JSON
   for (const block of [...textBlocks].reverse()) {
     if (block.type !== 'text') continue;
     let jsonStr = block.text.trim();
@@ -117,12 +162,21 @@ export async function parseWineList(filePath: string): Promise<ParseResult> {
           currency: parsed.currency || 'USD',
           wines: parsed.wines as ParsedWine[],
         };
-      } catch { /* try next block */ }
+      } catch { /* try next block or salvage */ }
     }
   }
 
-  // If we get here, no block had valid JSON — log and throw
-  const allText = textBlocks.map(b => b.type === 'text' ? b.text : '').join('\n');
+  // If JSON was truncated (hit max_tokens), salvage what we can
+  if (response.stop_reason === 'max_tokens') {
+    console.log('Response was truncated (max_tokens). Attempting to salvage partial wines...');
+    const salvaged = salvageTruncatedJson(allText);
+    if (salvaged) return salvaged;
+  }
+
+  // Last resort: try to salvage from any text
+  const salvaged = salvageTruncatedJson(allText);
+  if (salvaged) return salvaged;
+
   console.error('Failed to find JSON in parser response. Full text:', allText.substring(0, 1000));
   throw new Error(`Could not parse wine list. Claude responded: "${allText.substring(0, 100)}..."`);
 }
