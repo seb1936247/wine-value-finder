@@ -43,6 +43,10 @@ export function getCacheStats() {
   return { size: lookupCache.size };
 }
 
+export function clearWineCache(wine: WineValueResult, currency: string): void {
+  lookupCache.delete(cacheKey(wine, currency));
+}
+
 // ── Common wine producer abbreviation expansions ─────────────────
 const PRODUCER_EXPANSIONS: Record<string, string> = {
   'py': 'Pierre-Yves',
