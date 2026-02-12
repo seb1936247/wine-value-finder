@@ -26,8 +26,8 @@ router.post('/:sessionId', async (req, res) => {
   try {
     const pendingWines = session.wines.filter(w => w.lookupStatus === 'pending');
 
-    // Each wine gets its own web search API call, run in waves of 5 parallel
-    const WAVE_SIZE = 5;
+    // Direct HTTP scraping — much faster than API calls, can run more in parallel
+    const WAVE_SIZE = 10;
     const waves: typeof pendingWines[] = [];
     for (let i = 0; i < pendingWines.length; i += WAVE_SIZE) {
       waves.push(pendingWines.slice(i, i + WAVE_SIZE));
