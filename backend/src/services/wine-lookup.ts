@@ -4,7 +4,7 @@ import type { WineValueResult } from '../types/wine.js';
 
 const client = new Anthropic({
   apiKey: config.anthropicApiKey,
-  timeout: 5 * 60 * 1000, // 5 min timeout for batches
+  timeout: 5 * 60 * 1000, // 5 min timeout
 });
 
 export interface WineLookupData {
@@ -43,21 +43,48 @@ export function getCacheStats() {
   return { size: lookupCache.size };
 }
 
-// ── Single wine lookup with web search ──────────────────────────
+// ── Build Wine-Searcher URL ─────────────────────────────────────
+function buildWineSearcherUrl(wine: WineValueResult, currency: string): string {
+  const searchTerms = wine.name
+    .replace(/['']/g, '')
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, '+')
+    .toLowerCase();
+  const vintageStr = wine.vintage ? `/${wine.vintage}` : '';
+  const country = currency === 'GBP' ? '/uk'
+    : currency === 'EUR' ? '/europe'
+    : currency === 'AUD' ? '/australia'
+    : '/usa';
+  return `https://www.wine-searcher.com/find/${searchTerms}${vintageStr}${country}`;
+}
+
+// ── Single wine lookup with web search + web fetch ──────────────
 async function lookupSingleWine(wine: WineValueResult, currency: string): Promise<WineLookupData> {
   const vintageStr = wine.vintage ?? 'NV';
   const producer = wine.producer || '';
+  const wsUrl = buildWineSearcherUrl(wine, currency);
 
-  const prompt = `Find the retail price and ratings for this wine by searching wine-searcher.com and cellartracker.com.
+  const currencyLabel = currency === 'GBP' ? 'British Pounds (GBP/£)'
+    : currency === 'EUR' ? 'Euros (EUR/€)'
+    : 'US Dollars (USD/$)';
+
+  const prompt = `I need you to fetch the Wine-Searcher page for this wine and extract pricing and rating data.
 
 Wine: "${wine.name}" ${vintageStr}
 Producer: "${producer}"
 
-Instructions:
-1. Search wine-searcher.com for "${producer} ${wine.name.replace(producer, '').trim()} ${vintageStr}" — find the average retail price (750ml) and the highest critic score (Parker, Suckling, Wine Spectator, Vinous, Jancis Robinson, Decanter, etc.)
-2. Search cellartracker.com for "${producer} ${wine.name.replace(producer, '').trim()} ${vintageStr}" — find the community average score and number of tasting notes
+Wine-Searcher URL: ${wsUrl}
 
-${currency === 'GBP' ? 'Prices in GBP (£). Look at UK prices.' : currency === 'EUR' ? 'Prices in EUR (€).' : 'Prices in USD ($).'}
+Please fetch this Wine-Searcher URL and extract:
+1. The average retail price (look in the meta description for "Avg Price (ex-tax)" or in the page content)
+2. Critic scores (look in the JSON-LD structured data for "CriticReview" entries — Parker, Suckling, Wine Spectator, Vinous, Jancis Robinson, Decanter)
+3. CellarTracker community score (look in JSON-LD for a review where author name is "CellarTracker")
+
+If the Wine-Searcher page doesn't load or shows a search results list instead of a wine page, search for "${producer} ${wine.name.replace(producer, '').trim()} ${vintageStr} wine-searcher" to find the correct page, then fetch that.
+
+Also search for "${producer} ${wine.name.replace(producer, '').trim()} ${vintageStr} cellartracker" for community score if not found on Wine-Searcher.
+
+Prices must be in ${currencyLabel}.
 
 Return ONLY a JSON object, no explanation:
 {"retailPriceAvg": <number or null>, "retailPriceMin": <number or null>, "criticScore": <number 0-100 or null>, "communityScore": <number 0-100 or null>, "communityReviewCount": <number or null>}`;
@@ -71,22 +98,31 @@ Return ONLY a JSON object, no explanation:
 
   const requestBody: any = {
     model: 'claude-sonnet-4-20250514',
-    max_tokens: 2048,
+    max_tokens: 4096,
+    betas: ['web-fetch-2025-09-10'],
     messages: [{ role: 'user', content: prompt }],
-    tools: [{
-      type: 'web_search_20250305',
-      name: 'web_search',
-      max_uses: 5,
-      allowed_domains: ['wine-searcher.com', 'cellartracker.com'],
-      user_location: userLocation,
-    }],
+    tools: [
+      {
+        type: 'web_search_20250305',
+        name: 'web_search',
+        max_uses: 3,
+        allowed_domains: ['wine-searcher.com', 'cellartracker.com'],
+        user_location: userLocation,
+      },
+      {
+        type: 'web_fetch_20250910',
+        name: 'web_fetch',
+        max_uses: 2,
+        allowed_domains: ['wine-searcher.com', 'cellartracker.com'],
+      },
+    ],
   };
 
-  let response = await client.messages.create(requestBody);
+  let response = await (client.beta as any).messages.create(requestBody);
 
   // Handle pause_turn — continue the conversation if Claude paused
   let attempts = 0;
-  while ((response.stop_reason as string) === 'pause_turn' && attempts < 5) {
+  while ((response.stop_reason as string) === 'pause_turn' && attempts < 6) {
     attempts++;
     console.log(`    pause_turn for "${wine.name}", continuing (attempt ${attempts})...`);
     requestBody.messages = [
@@ -94,7 +130,7 @@ Return ONLY a JSON object, no explanation:
       { role: 'assistant', content: response.content },
       { role: 'user', content: 'Please continue and provide the JSON result.' },
     ];
-    response = await client.messages.create(requestBody);
+    response = await (client.beta as any).messages.create(requestBody);
   }
 
   // Extract JSON from response
