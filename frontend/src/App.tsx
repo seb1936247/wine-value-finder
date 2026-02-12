@@ -100,6 +100,7 @@ export default function App() {
             wines={session.wines}
             status={session.status}
             currency={session.currency || 'USD'}
+            sessionId={session.id}
             onStartLookup={startLookup}
             onEditWine={editWine}
           />

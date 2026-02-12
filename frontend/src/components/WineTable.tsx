@@ -7,6 +7,7 @@ interface Props {
   wines: WineValueResult[];
   status: string;
   currency: string;
+  sessionId: string;
   onStartLookup: () => void;
   onEditWine: (index: number, updates: Record<string, unknown>) => void;
 }
@@ -17,7 +18,7 @@ const CURRENCY_SYMBOLS: Record<string, string> = {
 
 type SortKey = 'name' | 'vintage' | 'restaurantPrice' | 'retailPriceAvg' | 'markupPercent' | 'criticScore' | 'communityScore' | 'valueScore';
 
-export default function WineTable({ wines, status, currency, onStartLookup, onEditWine }: Props) {
+export default function WineTable({ wines, status, currency, sessionId, onStartLookup, onEditWine }: Props) {
   const sym = CURRENCY_SYMBOLS[currency] || currency + ' ';
   const [sortKey, setSortKey] = useState<SortKey>('valueScore');
   const [sortAsc, setSortAsc] = useState(false);
@@ -114,7 +115,7 @@ export default function WineTable({ wines, status, currency, onStartLookup, onEd
           )}
           {(status === 'complete' || hasLookupData) && (
             <a
-              href={`/api/wines/${wines.length > 0 ? '' : ''}export`}
+              href={`/api/wines/${sessionId}/export`}
               className="border border-gray-300 px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
             >
               Export CSV

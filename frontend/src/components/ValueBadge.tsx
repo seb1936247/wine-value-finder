@@ -3,7 +3,7 @@ interface Props {
 }
 
 export default function ValueBadge({ score }: Props) {
-  if (score === null) {
+  if (score == null) {
     return <span className="text-xs text-gray-400">--</span>;
   }
 

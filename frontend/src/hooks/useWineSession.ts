@@ -70,6 +70,7 @@ export function useWineSession() {
 
   const startLookup = useCallback(async () => {
     if (!session) return;
+    setError(null);
     try {
       const res = await fetch(`${API}/lookup/${session.id}`, { method: 'POST' });
       if (!res.ok) {
