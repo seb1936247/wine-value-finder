@@ -1,4 +1,11 @@
+import Anthropic from '@anthropic-ai/sdk';
+import { config } from '../config.js';
 import type { WineValueResult } from '../types/wine.js';
+
+const client = new Anthropic({
+  apiKey: config.anthropicApiKey,
+  timeout: 5 * 60 * 1000, // 5 min timeout for batches
+});
 
 export interface WineLookupData {
   retailPriceAvg: number | null;
@@ -36,164 +43,75 @@ export function getCacheStats() {
   return { size: lookupCache.size };
 }
 
-// ── Wine-Searcher direct scraping ───────────────────────────────
-// Wine-Searcher exposes structured data (JSON-LD) in its HTML that contains:
-// - Average price (from meta description)
-// - Critic reviews with scores
-// - CellarTracker community score
-// - Individual merchant offers with prices
-
-const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-
-interface WineSearcherData {
-  retailPriceAvg: number | null;
-  retailPriceMin: number | null;
-  criticScore: number | null;
-  communityScore: number | null;
-  communityReviewCount: number | null;
-}
-
-// Map currency to Wine-Searcher country code
-function currencyToCountry(currency: string): string {
-  switch (currency) {
-    case 'GBP': return 'uk';
-    case 'EUR': return 'europe';
-    case 'AUD': return 'australia';
-    case 'CAD': return 'canada';
-    default: return 'usa';
-  }
-}
-
-async function scrapeWineSearcher(wine: WineValueResult, currency: string): Promise<WineSearcherData> {
-  // Build Wine-Searcher URL
-  const searchTerms = wine.name
-    .replace(/['']/g, '')
-    .replace(/[^\w\s]/g, ' ')
-    .replace(/\s+/g, '+')
-    .toLowerCase();
-  const vintageStr = wine.vintage ? `/${wine.vintage}` : '';
-  const country = currencyToCountry(currency);
-  const url = `https://www.wine-searcher.com/find/${searchTerms}${vintageStr}/${country}`;
-
-  console.log(`    Scraping: ${url}`);
-
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': USER_AGENT,
-      'Accept': 'text/html,application/xhtml+xml',
-      'Accept-Language': 'en-US,en;q=0.9',
-    },
-  });
-
-  if (!response.ok) {
-    console.log(`    Wine-Searcher returned ${response.status} for "${wine.name}"`);
-    return { retailPriceAvg: null, retailPriceMin: null, criticScore: null, communityScore: null, communityReviewCount: null };
-  }
-
-  const html = await response.text();
-
-  // ── Extract average price from meta description ──
-  let retailPriceAvg: number | null = null;
-  const metaDescMatch = html.match(/<meta name="description" content="([^"]+)"/);
-  if (metaDescMatch) {
-    const priceMatch = metaDescMatch[1].match(/Avg Price \(ex-tax\)\s*[£$€]?([\d,]+(?:\.\d{2})?)/);
-    if (priceMatch) {
-      retailPriceAvg = parseFloat(priceMatch[1].replace(/,/g, ''));
-    }
-  }
-
-  // ── Extract JSON-LD structured data ──
-  let criticScore: number | null = null;
-  let communityScore: number | null = null;
-  let communityReviewCount: number | null = null;
-  let retailPriceMin: number | null = null;
-
-  const ldMatches = html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g);
-  for (const match of ldMatches) {
-    try {
-      const data = JSON.parse(match[1]);
-      if (data['@type'] !== 'Product') continue;
-
-      // Extract aggregate rating
-      if (data.aggregateRating) {
-        const aggRating = data.aggregateRating.ratingValue;
-        const aggCount = data.aggregateRating.ratingCount;
-        if (aggRating && !criticScore) {
-          criticScore = typeof aggRating === 'number' ? aggRating : parseInt(aggRating);
-        }
-        if (aggCount) {
-          communityReviewCount = typeof aggCount === 'number' ? aggCount : parseInt(aggCount);
-        }
-      }
-
-      // Extract critic reviews (includes CellarTracker)
-      if (Array.isArray(data.review)) {
-        let highestCritic: number | null = null;
-
-        for (const review of data.review) {
-          const author = review.author?.name || '';
-          const rating = review.reviewRating?.ratingValue;
-          if (!rating) continue;
-
-          const score = typeof rating === 'number' ? rating : parseFloat(rating);
-
-          if (author === 'CellarTracker') {
-            communityScore = score;
-          } else {
-            // It's a critic review — track the highest
-            if (highestCritic === null || score > highestCritic) {
-              highestCritic = score;
-            }
-          }
-        }
-
-        if (highestCritic !== null) {
-          criticScore = highestCritic;
-        }
-      }
-
-      // Extract min price from offers
-      if (Array.isArray(data.offers) && data.offers.length > 0) {
-        const perBottlePrices: number[] = [];
-        for (const offer of data.offers) {
-          const price = parseFloat(offer.price);
-          if (isNaN(price) || price <= 0) continue;
-
-          const desc = (offer.description || '').toLowerCase();
-          let perBottle = price;
-          if (desc.includes('case of 6')) perBottle = price / 6;
-          else if (desc.includes('case of 12')) perBottle = price / 12;
-          else if (desc.includes('case of 3')) perBottle = price / 3;
-
-          perBottlePrices.push(Math.round(perBottle * 100) / 100);
-        }
-
-        if (perBottlePrices.length > 0) {
-          retailPriceMin = Math.min(...perBottlePrices);
-          // If we didn't get avg from meta description, calculate from offers
-          if (retailPriceAvg === null) {
-            retailPriceAvg = Math.round((perBottlePrices.reduce((a, b) => a + b, 0) / perBottlePrices.length) * 100) / 100;
-          }
-        }
-      }
-    } catch {
-      // Skip malformed JSON-LD
-    }
-  }
-
-  return { retailPriceAvg, retailPriceMin, criticScore, communityScore, communityReviewCount };
-}
-
-// ── Single wine lookup ──────────────────────────────────────────
+// ── Single wine lookup with web search ──────────────────────────
 async function lookupSingleWine(wine: WineValueResult, currency: string): Promise<WineLookupData> {
-  try {
-    const data = await scrapeWineSearcher(wine, currency);
-    console.log(`    ${wine.name}: price=${data.retailPriceAvg}, critic=${data.criticScore}, community=${data.communityScore}`);
-    return data;
-  } catch (err) {
-    console.error(`    Error scraping "${wine.name}":`, (err as Error).message);
-    return { retailPriceAvg: null, retailPriceMin: null, criticScore: null, communityScore: null, communityReviewCount: null };
+  const vintageStr = wine.vintage ?? 'NV';
+  const producer = wine.producer || '';
+
+  const prompt = `Find the retail price and ratings for this wine by searching wine-searcher.com and cellartracker.com.
+
+Wine: "${wine.name}" ${vintageStr}
+Producer: "${producer}"
+
+Instructions:
+1. Search wine-searcher.com for "${producer} ${wine.name.replace(producer, '').trim()} ${vintageStr}" — find the average retail price (750ml) and the highest critic score (Parker, Suckling, Wine Spectator, Vinous, Jancis Robinson, Decanter, etc.)
+2. Search cellartracker.com for "${producer} ${wine.name.replace(producer, '').trim()} ${vintageStr}" — find the community average score and number of tasting notes
+
+${currency === 'GBP' ? 'Prices in GBP (£). Look at UK prices.' : currency === 'EUR' ? 'Prices in EUR (€).' : 'Prices in USD ($).'}
+
+Return ONLY a JSON object, no explanation:
+{"retailPriceAvg": <number or null>, "retailPriceMin": <number or null>, "criticScore": <number 0-100 or null>, "communityScore": <number 0-100 or null>, "communityReviewCount": <number or null>}`;
+
+  const requestBody: any = {
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 2048,
+    messages: [{ role: 'user', content: prompt }],
+    tools: [{
+      type: 'web_search_20250305',
+      name: 'web_search',
+      max_uses: 5,
+    }],
+  };
+
+  let response = await client.messages.create(requestBody);
+
+  // Handle pause_turn — continue the conversation if Claude paused
+  let attempts = 0;
+  while ((response.stop_reason as string) === 'pause_turn' && attempts < 5) {
+    attempts++;
+    console.log(`    pause_turn for "${wine.name}", continuing (attempt ${attempts})...`);
+    requestBody.messages = [
+      { role: 'user', content: prompt },
+      { role: 'assistant', content: response.content },
+      { role: 'user', content: 'Please continue and provide the JSON result.' },
+    ];
+    response = await client.messages.create(requestBody);
   }
+
+  // Extract JSON from response
+  const textBlocks = response.content.filter((b: any) => b.type === 'text');
+
+  for (const block of [...textBlocks].reverse()) {
+    if (block.type !== 'text') continue;
+    let str = block.text.trim();
+
+    // Strip markdown fences
+    if (str.startsWith('```')) {
+      str = str.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+    }
+
+    // Find JSON object
+    const firstBrace = str.indexOf('{');
+    const lastBrace = str.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      try {
+        return JSON.parse(str.substring(firstBrace, lastBrace + 1));
+      } catch { /* try next block */ }
+    }
+  }
+
+  console.log(`    No valid JSON for "${wine.name}", returning nulls`);
+  return { retailPriceAvg: null, retailPriceMin: null, criticScore: null, communityScore: null, communityReviewCount: null };
 }
 
 // ── Batch lookup — runs individual lookups in parallel ───────────
@@ -220,7 +138,7 @@ export async function lookupWinesBatch(wines: WineValueResult[], currency: strin
     return results as WineLookupData[];
   }
 
-  // Look up each uncached wine in parallel
+  // Look up each uncached wine individually (in parallel within this batch)
   const lookupPromises = uncachedIndices.map(async (origIdx) => {
     const wine = wines[origIdx];
     try {
