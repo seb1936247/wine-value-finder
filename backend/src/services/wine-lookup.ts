@@ -43,48 +43,73 @@ export function getCacheStats() {
   return { size: lookupCache.size };
 }
 
-// ── Build Wine-Searcher URL ─────────────────────────────────────
-function buildWineSearcherUrl(wine: WineValueResult, currency: string): string {
-  const searchTerms = wine.name
-    .replace(/['']/g, '')
-    .replace(/[^\w\s]/g, ' ')
-    .replace(/\s+/g, '+')
-    .toLowerCase();
-  const vintageStr = wine.vintage ? `/${wine.vintage}` : '';
-  const country = currency === 'GBP' ? '/uk'
-    : currency === 'EUR' ? '/europe'
-    : currency === 'AUD' ? '/australia'
-    : '/usa';
-  return `https://www.wine-searcher.com/find/${searchTerms}${vintageStr}${country}`;
+// ── Common wine producer abbreviation expansions ─────────────────
+const PRODUCER_EXPANSIONS: Record<string, string> = {
+  'py': 'Pierre-Yves',
+  'jl': 'Jean-Louis',
+  'jm': 'Jean-Marc',
+  'jp': 'Jean-Pierre',
+  'jf': 'Jean-François',
+  'jb': 'Jean-Baptiste',
+  'fl': 'François-Louis',
+  'ch': 'Chateau',
+  'ch.': 'Chateau',
+  'dom': 'Domaine',
+  'dom.': 'Domaine',
+  'cht': 'Chateau',
+  'cht.': 'Chateau',
+  'mme': 'Madame',
+};
+
+function expandProducerName(producer: string): string {
+  const words = producer.split(/\s+/);
+  const expanded = words.map(w => {
+    const lower = w.toLowerCase();
+    return PRODUCER_EXPANSIONS[lower] || w;
+  });
+  return expanded.join(' ');
 }
 
-// ── Single wine lookup with web search + web fetch ──────────────
+// ── Single wine lookup with web search ──────────────────────────
 async function lookupSingleWine(wine: WineValueResult, currency: string): Promise<WineLookupData> {
   const vintageStr = wine.vintage ?? 'NV';
   const producer = wine.producer || '';
-  const wsUrl = buildWineSearcherUrl(wine, currency);
+  const expandedProducer = expandProducerName(producer);
+  const winePart = wine.name.replace(producer, '').trim();
+  const searchName = `${expandedProducer} ${winePart}`.trim();
 
   const currencyLabel = currency === 'GBP' ? 'British Pounds (GBP/£)'
     : currency === 'EUR' ? 'Euros (EUR/€)'
+    : currency === 'AUD' ? 'Australian Dollars (AUD/A$)'
     : 'US Dollars (USD/$)';
 
-  const prompt = `I need you to fetch the Wine-Searcher page for this wine and extract pricing and rating data.
+  const conversionNote = currency === 'GBP'
+    ? 'If prices are in USD, convert to GBP (1 USD ≈ 0.79 GBP). If in EUR, convert (1 EUR ≈ 0.84 GBP).'
+    : currency === 'EUR'
+    ? 'If prices are in USD, convert to EUR (1 USD ≈ 0.92 EUR). If in GBP, convert (1 GBP ≈ 1.19 EUR).'
+    : '';
+
+  const prompt = `Find the retail price and ratings for this wine using web search.
 
 Wine: "${wine.name}" ${vintageStr}
-Producer: "${producer}"
+Producer: "${expandedProducer}"
 
-Wine-Searcher URL: ${wsUrl}
+Search Strategy:
+1. Search for: site:wine-searcher.com ${searchName} ${vintageStr}
+   - Wine-Searcher result snippets show "Avg Price (ex-tax) $XXX / 750ml" and critic scores like "XX / 100"
+   - Look for the snippet matching this exact wine and vintage
 
-Please fetch this Wine-Searcher URL and extract:
-1. The average retail price (look in the meta description for "Avg Price (ex-tax)" or in the page content)
-2. Critic scores (look in the JSON-LD structured data for "CriticReview" entries — Parker, Suckling, Wine Spectator, Vinous, Jancis Robinson, Decanter)
-3. CellarTracker community score (look in JSON-LD for a review where author name is "CellarTracker")
+2. Search for: site:cellartracker.com ${searchName} ${vintageStr}
+   - CellarTracker snippets show community scores like "CT XX" and "X reviews" or "X community tasting notes"
 
-If the Wine-Searcher page doesn't load or shows a search results list instead of a wine page, search for "${producer} ${wine.name.replace(producer, '').trim()} ${vintageStr} wine-searcher" to find the correct page, then fetch that.
+3. If the above don't return results, try: "${searchName} ${vintageStr} wine price critic score"
 
-Also search for "${producer} ${wine.name.replace(producer, '').trim()} ${vintageStr} cellartracker" for community score if not found on Wine-Searcher.
+Wine-Searcher snippets typically contain "Avg Price (ex-tax)" and critic scores.
+CellarTracker snippets show community scores and review counts.
+Vivino scores (X.X out of 5) should be converted to 0-100 scale (multiply by 20).
 
-Prices must be in ${currencyLabel}.
+${conversionNote}
+Prices should be in ${currencyLabel}. Round to the nearest whole number.
 
 Return ONLY a JSON object, no explanation:
 {"retailPriceAvg": <number or null>, "retailPriceMin": <number or null>, "criticScore": <number 0-100 or null>, "communityScore": <number 0-100 or null>, "communityReviewCount": <number or null>}`;
@@ -94,35 +119,30 @@ Return ONLY a JSON object, no explanation:
     ? { type: 'approximate', country: 'GB', region: 'England', city: 'London' }
     : currency === 'EUR'
     ? { type: 'approximate', country: 'FR', region: 'Ile-de-France', city: 'Paris' }
+    : currency === 'AUD'
+    ? { type: 'approximate', country: 'AU', region: 'New South Wales', city: 'Sydney' }
     : { type: 'approximate', country: 'US', region: 'New York', city: 'New York' };
 
   const requestBody: any = {
     model: 'claude-sonnet-4-20250514',
-    max_tokens: 4096,
-    betas: ['web-fetch-2025-09-10'],
+    max_tokens: 2048,
     messages: [{ role: 'user', content: prompt }],
     tools: [
       {
         type: 'web_search_20250305',
         name: 'web_search',
-        max_uses: 3,
-        allowed_domains: ['wine-searcher.com', 'cellartracker.com'],
+        max_uses: 5,
         user_location: userLocation,
-      },
-      {
-        type: 'web_fetch_20250910',
-        name: 'web_fetch',
-        max_uses: 2,
-        allowed_domains: ['wine-searcher.com', 'cellartracker.com'],
+        // Note: No allowed_domains — unrestricted search gives much better results
       },
     ],
   };
 
-  let response = await (client.beta as any).messages.create(requestBody);
+  let response = await client.messages.create(requestBody);
 
   // Handle pause_turn — continue the conversation if Claude paused
   let attempts = 0;
-  while ((response.stop_reason as string) === 'pause_turn' && attempts < 6) {
+  while ((response.stop_reason as string) === 'pause_turn' && attempts < 5) {
     attempts++;
     console.log(`    pause_turn for "${wine.name}", continuing (attempt ${attempts})...`);
     requestBody.messages = [
@@ -130,7 +150,7 @@ Return ONLY a JSON object, no explanation:
       { role: 'assistant', content: response.content },
       { role: 'user', content: 'Please continue and provide the JSON result.' },
     ];
-    response = await (client.beta as any).messages.create(requestBody);
+    response = await client.messages.create(requestBody);
   }
 
   // Extract JSON from response
