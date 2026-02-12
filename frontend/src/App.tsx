@@ -3,6 +3,8 @@ import UploadZone from './components/UploadZone.tsx';
 import WineTable from './components/WineTable.tsx';
 import { useWineSession } from './hooks/useWineSession.ts';
 
+const API = import.meta.env.VITE_API_URL || '/api';
+
 function ParsingProgress() {
   const [elapsed, setElapsed] = useState(0);
   const steps = [
@@ -84,7 +86,7 @@ export default function App() {
             </button>
             {session.status === 'complete' && (
               <a
-                href={`/api/wines/${session.id}/export`}
+                href={`${API}/wines/${session.id}/export`}
                 className="text-sm text-purple-600 hover:text-purple-800 transition-colors"
               >
                 Download CSV

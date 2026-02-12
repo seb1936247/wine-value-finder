@@ -46,25 +46,33 @@ export function getCacheStats() {
 // ── Single wine lookup with web search ──────────────────────────
 async function lookupSingleWine(wine: WineValueResult, currency: string): Promise<WineLookupData> {
   const vintageStr = wine.vintage ?? 'NV';
-  // Build a concise search name: producer + key wine name (without long descriptors)
   const producer = wine.producer || '';
-  const simpleName = producer ? `${producer} ${wine.name.replace(producer, '').trim()}` : wine.name;
 
-  const prompt = `Find retail price and ratings for this wine. Return JSON only.
+  // Build Wine-Searcher search term: use producer + wine name keywords
+  // Wine-Searcher uses format: wine-searcher.com/find/producer+wine+name/vintage
+  const searchName = wine.name
+    .replace(/\s+/g, ' ')
+    .trim();
 
-Wine: "${wine.name}"
-Producer: ${producer || 'unknown'}
+  const prompt = `Look up this wine on wine-searcher.com and cellartracker.com. Return JSON only.
+
+Wine: "${searchName}"
 Vintage: ${vintageStr}
+Producer: ${producer}
 
-Search wine-searcher.com for "${simpleName} ${vintageStr}" to find:
-- Average retail price and lowest price for a 750ml bottle in ${currency}
-- Critic score (Parker, Suckling, Wine Spectator, Vinous, or Decanter)
+STEP 1: Search for this wine on wine-searcher.com to find:
+- The average retail price for a standard 750ml bottle
+- The lowest retail price
+- The highest critic score shown (from Parker, Suckling, Wine Spectator, Vinous, Jancis Robinson, or Decanter)
+${currency === 'GBP' ? 'I need prices in British Pounds (GBP/£). Look at UK merchant prices.' : currency === 'EUR' ? 'I need prices in Euros (EUR/€).' : 'I need prices in US Dollars (USD/$).'}
 
-Then search cellartracker.com for "${producer} ${vintageStr}" to find community score.
+STEP 2: Search for this wine on cellartracker.com to find:
+- The community average score
+- The number of tasting notes/reviews
 
-${currency === 'GBP' ? 'Prices in GBP (£).' : currency === 'EUR' ? 'Prices in EUR (€).' : 'Prices in USD ($).'}
+IMPORTANT: These are well-known wine databases. Search specifically on wine-searcher.com and cellartracker.com — do NOT use general web searches. Use the producer name "${producer}" and wine name to search.
 
-Return ONLY JSON (no markdown):
+Return ONLY a JSON object (no markdown, no explanation):
 {"retailPriceAvg": <number or null>, "retailPriceMin": <number or null>, "criticScore": <number 0-100 or null>, "communityScore": <number 0-100 or null>, "communityReviewCount": <number or null>}`;
 
   const requestBody: any = {

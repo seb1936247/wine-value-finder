@@ -3,6 +3,8 @@ import type { WineValueResult } from '../types/wine.ts';
 import ValueBadge from './ValueBadge.tsx';
 import EditWineModal from './EditWineModal.tsx';
 
+const API = import.meta.env.VITE_API_URL || '/api';
+
 interface Props {
   wines: WineValueResult[];
   status: string;
@@ -115,7 +117,7 @@ export default function WineTable({ wines, status, currency, sessionId, onStartL
           )}
           {(status === 'complete' || hasLookupData) && (
             <a
-              href={`/api/wines/${sessionId}/export`}
+              href={`${API}/wines/${sessionId}/export`}
               className="border border-gray-300 px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
             >
               Export CSV
