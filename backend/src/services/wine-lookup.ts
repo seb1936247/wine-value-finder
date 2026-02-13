@@ -1,18 +1,16 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { config } from '../config.js';
 import type { WineValueResult } from '../types/wine.js';
+import { lookupViaWineSearcherApi, getRemainingApiCalls } from './wine-searcher-api.js';
+import { lookupCommunityScore } from './community-lookup.js';
+import { lookupViaWebSearch } from './web-search-fallback.js';
 
-const client = new Anthropic({
-  apiKey: config.anthropicApiKey,
-  timeout: 5 * 60 * 1000, // 5 min timeout
-});
-
+// ── Types ──────────────────────────────────────────────────────
 export interface WineLookupData {
   retailPriceAvg: number | null;
   retailPriceMin: number | null;
   criticScore: number | null;
   communityScore: number | null;
   communityReviewCount: number | null;
+  dataSource?: 'api' | 'web_search' | 'mixed';
 }
 
 // ── In-memory cache ─────────────────────────────────────────────
@@ -47,140 +45,63 @@ export function clearWineCache(wine: WineValueResult, currency: string): void {
   lookupCache.delete(cacheKey(wine, currency));
 }
 
-// ── Common wine producer abbreviation expansions ─────────────────
-const PRODUCER_EXPANSIONS: Record<string, string> = {
-  'py': 'Pierre-Yves',
-  'jl': 'Jean-Louis',
-  'jm': 'Jean-Marc',
-  'jp': 'Jean-Pierre',
-  'jf': 'Jean-François',
-  'jb': 'Jean-Baptiste',
-  'fl': 'François-Louis',
-  'ch': 'Chateau',
-  'ch.': 'Chateau',
-  'dom': 'Domaine',
-  'dom.': 'Domaine',
-  'cht': 'Chateau',
-  'cht.': 'Chateau',
-  'mme': 'Madame',
-};
-
-function expandProducerName(producer: string): string {
-  const words = producer.split(/\s+/);
-  const expanded = words.map(w => {
-    const lower = w.toLowerCase();
-    return PRODUCER_EXPANSIONS[lower] || w;
-  });
-  return expanded.join(' ');
+export function getLookupStatus(): { apiCallsRemaining: number; cacheSize: number } {
+  return {
+    apiCallsRemaining: getRemainingApiCalls(),
+    cacheSize: lookupCache.size,
+  };
 }
 
-// ── Single wine lookup with web search ──────────────────────────
+// ── Single wine lookup — orchestrator ───────────────────────────
+// Strategy:
+// 1. Wine-Searcher API for price + critic (fast, accurate)
+// 2. In parallel: Claude web search for CellarTracker community score
+// 3. If API fails: Claude web search fallback for price + critic
 async function lookupSingleWine(wine: WineValueResult, currency: string): Promise<WineLookupData> {
-  const vintageStr = wine.vintage ?? 'NV';
-  const producer = wine.producer || '';
-  const expandedProducer = expandProducerName(producer);
-  const winePart = wine.name.replace(producer, '').trim();
-  const searchName = `${expandedProducer} ${winePart}`.trim();
+  // Run API call and community score lookup IN PARALLEL
+  const [apiResult, communityResult] = await Promise.allSettled([
+    lookupViaWineSearcherApi(wine.name, wine.producer, wine.vintage, currency),
+    lookupCommunityScore(wine.name, wine.producer, wine.vintage),
+  ]);
 
-  const currencyLabel = currency === 'GBP' ? 'British Pounds (GBP/£)'
-    : currency === 'EUR' ? 'Euros (EUR/€)'
-    : currency === 'AUD' ? 'Australian Dollars (AUD/A$)'
-    : 'US Dollars (USD/$)';
+  const apiData = apiResult.status === 'fulfilled' ? apiResult.value : null;
+  const communityData = communityResult.status === 'fulfilled' ? communityResult.value : null;
 
-  const conversionNote = currency === 'GBP'
-    ? 'If prices are in USD, convert to GBP (1 USD ≈ 0.79 GBP). If in EUR, convert (1 EUR ≈ 0.84 GBP).'
-    : currency === 'EUR'
-    ? 'If prices are in USD, convert to EUR (1 USD ≈ 0.92 EUR). If in GBP, convert (1 GBP ≈ 1.19 EUR).'
-    : '';
-
-  const prompt = `Find the retail price and ratings for this wine using web search.
-
-Wine: "${wine.name}" ${vintageStr}
-Producer: "${expandedProducer}"
-
-Search Strategy:
-1. Search for: site:wine-searcher.com ${searchName} ${vintageStr}
-   - Wine-Searcher result snippets show "Avg Price (ex-tax) $XXX / 750ml" and critic scores like "XX / 100"
-   - Look for the snippet matching this exact wine and vintage
-
-2. Search for: site:cellartracker.com ${searchName} ${vintageStr}
-   - CellarTracker snippets show community scores like "CT XX" and "X reviews" or "X community tasting notes"
-
-3. If the above don't return results, try: "${searchName} ${vintageStr} wine price critic score"
-
-Wine-Searcher snippets typically contain "Avg Price (ex-tax)" and critic scores.
-CellarTracker snippets show community scores and review counts.
-Vivino scores (X.X out of 5) should be converted to 0-100 scale (multiply by 20).
-
-${conversionNote}
-Prices should be in ${currencyLabel}. Round to the nearest whole number.
-
-Return ONLY a JSON object, no explanation:
-{"retailPriceAvg": <number or null>, "retailPriceMin": <number or null>, "criticScore": <number 0-100 or null>, "communityScore": <number 0-100 or null>, "communityReviewCount": <number or null>}`;
-
-  // Build user location for currency-appropriate results
-  const userLocation = currency === 'GBP'
-    ? { type: 'approximate', country: 'GB', region: 'England', city: 'London' }
-    : currency === 'EUR'
-    ? { type: 'approximate', country: 'FR', region: 'Ile-de-France', city: 'Paris' }
-    : currency === 'AUD'
-    ? { type: 'approximate', country: 'AU', region: 'New South Wales', city: 'Sydney' }
-    : { type: 'approximate', country: 'US', region: 'New York', city: 'New York' };
-
-  const requestBody: any = {
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 2048,
-    messages: [{ role: 'user', content: prompt }],
-    tools: [
-      {
-        type: 'web_search_20250305',
-        name: 'web_search',
-        max_uses: 5,
-        user_location: userLocation,
-        // Note: No allowed_domains — unrestricted search gives much better results
-      },
-    ],
+  let result: WineLookupData = {
+    retailPriceAvg: null,
+    retailPriceMin: null,
+    criticScore: null,
+    communityScore: communityData?.communityScore ?? null,
+    communityReviewCount: communityData?.communityReviewCount ?? null,
+    dataSource: undefined,
   };
 
-  let response = await client.messages.create(requestBody);
+  if (apiData && apiData.status === 'success' && (apiData.retailPriceAvg !== null || apiData.criticScore !== null)) {
+    // API gave us good data
+    result.retailPriceAvg = apiData.retailPriceAvg;
+    result.retailPriceMin = apiData.retailPriceMin;
+    result.criticScore = apiData.criticScore;
+    result.dataSource = communityData?.communityScore !== null ? 'mixed' : 'api';
+    console.log(`  [API] "${wine.name}" ${wine.vintage ?? 'NV'}: avg=${apiData.retailPriceAvg}, critic=${apiData.criticScore}`);
+  } else {
+    // API failed or unavailable — fall back to web search
+    const reason = apiData?.status ?? 'error';
+    console.log(`  [API] "${wine.name}" ${wine.vintage ?? 'NV'}: ${reason}, falling back to web search`);
 
-  // Handle pause_turn — continue the conversation if Claude paused
-  let attempts = 0;
-  while ((response.stop_reason as string) === 'pause_turn' && attempts < 5) {
-    attempts++;
-    console.log(`    pause_turn for "${wine.name}", continuing (attempt ${attempts})...`);
-    requestBody.messages = [
-      { role: 'user', content: prompt },
-      { role: 'assistant', content: response.content },
-      { role: 'user', content: 'Please continue and provide the JSON result.' },
-    ];
-    response = await client.messages.create(requestBody);
-  }
+    const fallbackData = await lookupViaWebSearch(wine, currency);
+    result.retailPriceAvg = fallbackData.retailPriceAvg;
+    result.retailPriceMin = fallbackData.retailPriceMin;
+    result.criticScore = fallbackData.criticScore;
+    result.dataSource = 'web_search';
 
-  // Extract JSON from response
-  const textBlocks = response.content.filter((b: any) => b.type === 'text');
-
-  for (const block of [...textBlocks].reverse()) {
-    if (block.type !== 'text') continue;
-    let str = block.text.trim();
-
-    // Strip markdown fences
-    if (str.startsWith('```')) {
-      str = str.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
-    }
-
-    // Find JSON object
-    const firstBrace = str.indexOf('{');
-    const lastBrace = str.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace > firstBrace) {
-      try {
-        return JSON.parse(str.substring(firstBrace, lastBrace + 1));
-      } catch { /* try next block */ }
+    // If community score wasn't found by dedicated lookup, use fallback's data
+    if (result.communityScore === null) {
+      result.communityScore = fallbackData.communityScore;
+      result.communityReviewCount = fallbackData.communityReviewCount;
     }
   }
 
-  console.log(`    No valid JSON for "${wine.name}", returning nulls`);
-  return { retailPriceAvg: null, retailPriceMin: null, criticScore: null, communityScore: null, communityReviewCount: null };
+  return result;
 }
 
 // ── Batch lookup — runs individual lookups in parallel ───────────

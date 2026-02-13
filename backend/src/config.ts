@@ -38,6 +38,7 @@ export const config = {
   port: parseInt(process.env.PORT || '3001', 10),
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
   wineSearcherApiKey: process.env.WINE_SEARCHER_API_KEY || '',
+  hasWineSearcherApi: Boolean(process.env.WINE_SEARCHER_API_KEY),
   uploadsDir,
   maxFileSizeMB: 20,
 };
@@ -46,5 +47,10 @@ export function validateConfig() {
   if (!config.anthropicApiKey) {
     console.error('ERROR: ANTHROPIC_API_KEY is required. Copy .env.example to .env and add your key.');
     process.exit(1);
+  }
+  if (config.hasWineSearcherApi) {
+    console.log('Wine-Searcher API key configured — using API for price/critic data');
+  } else {
+    console.log('No Wine-Searcher API key — using web search fallback for all lookups');
   }
 }

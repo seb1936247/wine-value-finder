@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { getSession, setSession } from '../utils/sessions.js';
-import { lookupWinesBatch, clearWineCache } from '../services/wine-lookup.js';
+import { lookupWinesBatch, clearWineCache, getLookupStatus } from '../services/wine-lookup.js';
 import { calculateMarkup, calculateValueScore } from '../services/value-calculator.js';
 
 const router = Router();
@@ -27,6 +27,10 @@ router.post('/:sessionId', async (req, res) => {
 
   try {
     const pendingWines = sess.wines.filter(w => w.lookupStatus === 'pending');
+
+    // Log API budget
+    const lookupStatus = getLookupStatus();
+    console.log(`Starting lookup: ${pendingWines.length} wines, API calls remaining today: ${lookupStatus.apiCallsRemaining}, cache size: ${lookupStatus.cacheSize}`);
 
     // Each wine gets its own API call with web search, run in parallel waves
     const WAVE_SIZE = 5;
@@ -56,6 +60,7 @@ router.post('/:sessionId', async (req, res) => {
             wine.criticScore = wine.criticScore ?? data.criticScore;
             wine.communityScore = wine.communityScore ?? data.communityScore;
             wine.communityReviewCount = wine.communityReviewCount ?? data.communityReviewCount;
+            wine.dataSource = data.dataSource;
 
             // Generate links for user to verify
             const searchName = encodeURIComponent(wine.name.replace(/ /g, '+'));

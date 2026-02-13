@@ -18,6 +18,7 @@ export interface WineLookupResult {
   lookupStatus: 'pending' | 'found' | 'partial' | 'not_found' | 'error';
   wineSearcherUrl: string | null;
   cellarTrackerUrl: string | null;
+  dataSource?: 'api' | 'web_search' | 'mixed';
 }
 
 export interface WineValueResult extends ParsedWine, WineLookupResult {
