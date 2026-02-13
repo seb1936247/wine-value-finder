@@ -100,5 +100,12 @@ export function useWineSession() {
     }
   }, [session]);
 
-  return { session, uploading, error, upload, startLookup, editWine };
+  const reset = useCallback(() => {
+    stopPolling();
+    setSession(null);
+    setUploading(false);
+    setError(null);
+  }, [stopPolling]);
+
+  return { session, uploading, error, upload, startLookup, editWine, reset };
 }
